@@ -33,12 +33,10 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.DataOutputStream;
-import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -53,34 +51,37 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final String PREFS = "mokahome";
-    private static final int COLS = 4;
-    private static final int MAX_TILES = 12;
+    private static final int COLS = 6;
+    private static final int MAX_TILES = 18;
     private static final int INITIAL_TILES = 8;
 
-    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private static final int BG = Color.rgb(24, 24, 23);
+    private static final int CARD = Color.rgb(45, 45, 45);
+    private static final int CARD_FOCUS = Color.rgb(57, 57, 57);
+    private static final int MUTED = Color.rgb(165, 165, 165);
+    private static final int GREEN = Color.rgb(0, 215, 92);
+    private static final int RED = Color.rgb(255, 63, 67);
+    private static final int SEP = Color.rgb(145, 77, 25);
+
+    private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
 
-    private LinearLayout favoritesArea;
+    private LinearLayout appsArea;
     private TextView clockText;
+    private TextView amPmText;
     private TextView dateText;
-    private TextView ramText;
-    private TextView killerStatus;
-    private TextView killerLabel;
-    private View killerCard;
     private ImageView networkIcon;
-    private TextView networkLabel;
-    private TextView volumeLabel;
+    private TextView ramTopText;
+    private int tileSizePx;
+    private long lastHomeTakeoverAt;
+    private List<AppEntry> cachedApps = new ArrayList<>();
 
-    private int tileSize;
-
-    private final Runnable statusTask = new Runnable() {
+    private final Runnable minuteTask = new Runnable() {
         @Override
         public void run() {
             updateClock();
-            refreshRam();
-            updateNetworkStatus();
-            updateVolumeStatus();
-            uiHandler.postDelayed(this, 5000);
+            updateNetworkIcon();
+            ui.postDelayed(this, 60_000);
         }
     };
 
@@ -92,592 +93,447 @@ public class MainActivity extends Activity {
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        tileSize = calculateTileSize();
+        tileSizePx = calculateTileSize();
+        cachedApps = getLaunchableApps();
         migrateFavoritesStorage();
         initializeFavoritesIfNeeded();
+
         setContentView(buildHome());
-        renderFavorites();
+        renderApps();
         updateClock();
-        refreshRam();
-        updateNetworkStatus();
-        updateVolumeStatus();
-        uiHandler.postDelayed(statusTask, 5000);
-        uiHandler.postDelayed(this::ensureDefaultLauncher, 900);
+        updateNetworkIcon();
+
+        ui.postDelayed(minuteTask, 60_000);
+        ui.postDelayed(this::ensureLauncherOwnership, 700);
     }
 
     private View buildHome() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(11, 13, 16));
-        root.setPadding(dp(30), dp(18), dp(30), dp(18));
+        root.setBackgroundColor(BG);
+        root.setPadding(dp(38), dp(22), dp(38), dp(26));
 
-        root.addView(buildHeader(), new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(92)));
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.TOP | Gravity.CENTER_VERTICAL);
+        root.addView(top, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(166)));
 
-        LinearLayout titleRow = new LinearLayout(this);
-        titleRow.setOrientation(LinearLayout.HORIZONTAL);
-        titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView favTitle = text("Aplicaciones", 20, Color.rgb(232, 235, 239), true);
-        titleRow.addView(favTitle, new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        TextView help = text("Mantén OK para cambiar o eliminar", 13,
-                Color.rgb(135, 142, 152), false);
-        titleRow.addView(help);
-        root.addView(titleRow, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(34)));
+        top.addView(buildClockBlock(), new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.setVerticalScrollBarEnabled(false);
-        favoritesArea = new LinearLayout(this);
-        favoritesArea.setOrientation(LinearLayout.VERTICAL);
-        favoritesArea.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        scroll.addView(favoritesArea, new ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT,
-                ScrollView.LayoutParams.WRAP_CONTENT));
-        root.addView(scroll, new LinearLayout.LayoutParams(
+        LinearLayout tools = new LinearLayout(this);
+        tools.setOrientation(LinearLayout.HORIZONTAL);
+        tools.setGravity(Gravity.TOP | Gravity.RIGHT);
+        top.addView(tools, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT));
+
+        ramTopText = topTextButton("RAM", GREEN, this::freeMemory);
+        ramTopText.setTextSize(16);
+        tools.addView(ramTopText, toolLp(dp(82)));
+        tools.addView(separator());
+
+        TextView killer = topTextButton("✕", RED, this::killBackgroundApps);
+        killer.setTextSize(34);
+        tools.addView(killer, toolLp(dp(76)));
+        tools.addView(separator());
+
+        networkIcon = topIconButton(R.drawable.ic_network_off, this::openNetworkSettings);
+        tools.addView(networkIcon, toolLp(dp(72)));
+        tools.addView(separator());
+
+        ImageView bell = topIconButton(R.drawable.ic_notifications, this::expandNotifications);
+        tools.addView(bell, toolLp(dp(72)));
+        tools.addView(separator());
+
+        tools.addView(buildVolumeControl(), new LinearLayout.LayoutParams(dp(150), dp(68)));
+        tools.addView(separator());
+
+        TextView settings = topTextButton("⚙", Color.WHITE, () -> openSystem(Settings.ACTION_SETTINGS));
+        settings.setTextSize(32);
+        settings.setOnLongClickListener(v -> {
+            showLauncherRecovery();
+            return true;
+        });
+        tools.addView(settings, toolLp(dp(72)));
+
+        appsArea = new LinearLayout(this);
+        appsArea.setOrientation(LinearLayout.VERTICAL);
+        appsArea.setGravity(Gravity.TOP | Gravity.LEFT);
+        root.addView(appsArea, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        TextView utilTitle = text("Accesos rápidos", 15,
-                Color.rgb(175, 181, 190), true);
-        LinearLayout.LayoutParams utilTitleLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(28));
-        utilTitleLp.topMargin = dp(6);
-        root.addView(utilTitle, utilTitleLp);
-
-        LinearLayout utilityRow = new LinearLayout(this);
-        utilityRow.setOrientation(LinearLayout.HORIZONTAL);
-        utilityRow.setGravity(Gravity.CENTER);
-        root.addView(utilityRow, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(88)));
-
-        utilityRow.addView(createUtilityCard("APPS", "Todas las apps", this::showAllApps), utilityLp(0));
-        killerCard = createUtilityCard("✕", "Cerrar apps", this::killBackgroundApps);
-        killerLabel = (TextView) killerCard.getTag();
-        utilityRow.addView(killerCard, utilityLp(1));
-        utilityRow.addView(createUtilityCard("⚙", "Ajustes", () -> openSystem(Settings.ACTION_SETTINGS)), utilityLp(2));
-        utilityRow.addView(createUtilityCard("Wi‑Fi", "Red", () -> openSystem(Settings.ACTION_WIFI_SETTINGS)), utilityLp(3));
-
-        killerStatus = text("", 12, Color.rgb(145, 151, 160), false);
-        killerStatus.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        root.addView(killerStatus, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(24)));
 
         return root;
     }
 
-    private View buildHeader() {
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.HORIZONTAL);
-        top.setGravity(Gravity.CENTER_VERTICAL);
+    private View buildClockBlock() {
+        LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        block.setGravity(Gravity.LEFT | Gravity.TOP);
 
-        LinearLayout titleBox = new LinearLayout(this);
-        titleBox.setOrientation(LinearLayout.VERTICAL);
-        TextView brand = text("MokaHome", 30, Color.WHITE, true);
-        titleBox.addView(brand);
-        ramText = text("RAM", 13, Color.rgb(145, 151, 160), false);
-        LinearLayout.LayoutParams ramLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        ramLp.topMargin = dp(5);
-        titleBox.addView(ramText, ramLp);
-        top.addView(titleBox, new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+        LinearLayout timeRow = new LinearLayout(this);
+        timeRow.setOrientation(LinearLayout.HORIZONTAL);
+        timeRow.setGravity(Gravity.BOTTOM);
+        block.addView(timeRow, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        View network = createNetworkChip();
-        top.addView(network, headerLp(dp(116)));
+        clockText = text("--:--", 84, Color.WHITE, true);
+        clockText.setIncludeFontPadding(false);
+        timeRow.addView(clockText);
 
-        top.addView(createSmallHeaderButton("−", this::volumeDown), headerLp(dp(48)));
-        top.addView(createVolumeChip(), headerLp(dp(86)));
-        top.addView(createSmallHeaderButton("+", this::volumeUp), headerLp(dp(48)));
-        top.addView(createIconHeaderButton(R.drawable.ic_notifications, "Notificaciones", this::expandNotifications),
-                headerLp(dp(60)));
+        amPmText = text("", 32, Color.WHITE, true);
+        amPmText.setIncludeFontPadding(false);
+        LinearLayout.LayoutParams amLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        amLp.leftMargin = dp(5);
+        amLp.bottomMargin = dp(8);
+        timeRow.addView(amPmText, amLp);
 
-        LinearLayout clockBox = new LinearLayout(this);
-        clockBox.setOrientation(LinearLayout.VERTICAL);
-        clockBox.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        clockText = text("--:--", 28, Color.WHITE, true);
-        clockText.setGravity(Gravity.RIGHT);
-        clockBox.addView(clockText, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
-        dateText = text("", 12, Color.rgb(160, 166, 176), false);
-        dateText.setGravity(Gravity.RIGHT);
-        clockBox.addView(dateText, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams clockLp = new LinearLayout.LayoutParams(dp(220),
-                LinearLayout.LayoutParams.MATCH_PARENT);
-        clockLp.leftMargin = dp(12);
-        top.addView(clockBox, clockLp);
-
-        return top;
+        dateText = text("", 14, MUTED, false);
+        dateText.setIncludeFontPadding(false);
+        LinearLayout.LayoutParams dateLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        dateLp.topMargin = dp(4);
+        block.addView(dateText, dateLp);
+        return block;
     }
 
-    private LinearLayout.LayoutParams headerLp(int width) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(width, dp(58));
-        lp.leftMargin = dp(8);
-        return lp;
+    private TextView topTextButton(String value, int color, Runnable action) {
+        TextView v = text(value, 26, color, true);
+        v.setGravity(Gravity.CENTER);
+        makeTopFocusable(v);
+        v.setOnClickListener(x -> action.run());
+        return v;
     }
 
-    private View createNetworkChip() {
-        LinearLayout chip = headerChip();
-        chip.setOrientation(LinearLayout.HORIZONTAL);
-        chip.setGravity(Gravity.CENTER);
-        chip.setOnClickListener(v -> openSystem(Settings.ACTION_WIFI_SETTINGS));
-
-        networkIcon = new ImageView(this);
-        networkIcon.setColorFilter(Color.WHITE);
-        chip.addView(networkIcon, new LinearLayout.LayoutParams(dp(25), dp(25)));
-
-        networkLabel = text("Red", 14, Color.WHITE, true);
-        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        labelLp.leftMargin = dp(8);
-        chip.addView(networkLabel, labelLp);
-        return chip;
+    private ImageView topIconButton(int res, Runnable action) {
+        ImageView v = new ImageView(this);
+        v.setImageResource(res);
+        v.setColorFilter(Color.WHITE);
+        v.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        v.setPadding(dp(16), dp(16), dp(16), dp(16));
+        makeTopFocusable(v);
+        v.setOnClickListener(x -> action.run());
+        return v;
     }
 
-    private View createVolumeChip() {
-        LinearLayout chip = headerChip();
-        chip.setOrientation(LinearLayout.HORIZONTAL);
-        chip.setGravity(Gravity.CENTER);
-        chip.setOnClickListener(v -> {
-            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-            if (am != null) am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
-                    AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI);
+    private View buildVolumeControl() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
+
+        TextView minus = topTextButton("−", Color.WHITE, this::volumeDown);
+        minus.setTextSize(25);
+        row.addView(minus, new LinearLayout.LayoutParams(dp(42), dp(64)));
+
+        ImageView speaker = topIconButton(R.drawable.ic_volume, this::showVolumeUi);
+        row.addView(speaker, new LinearLayout.LayoutParams(dp(66), dp(64)));
+
+        TextView plus = topTextButton("+", Color.WHITE, this::volumeUp);
+        plus.setTextSize(24);
+        row.addView(plus, new LinearLayout.LayoutParams(dp(42), dp(64)));
+        return row;
+    }
+
+    private void makeTopFocusable(View v) {
+        v.setFocusable(true);
+        v.setClickable(true);
+        v.setBackgroundColor(Color.TRANSPARENT);
+        v.setAlpha(0.88f);
+        v.setOnFocusChangeListener((view, focused) -> {
+            view.animate().cancel();
+            view.animate()
+                    .scaleX(focused ? 1.16f : 1f)
+                    .scaleY(focused ? 1.16f : 1f)
+                    .alpha(focused ? 1f : 0.88f)
+                    .setDuration(65)
+                    .start();
         });
-
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(R.drawable.ic_volume);
-        icon.setColorFilter(Color.WHITE);
-        chip.addView(icon, new LinearLayout.LayoutParams(dp(24), dp(24)));
-        volumeLabel = text("--", 13, Color.WHITE, true);
-        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        labelLp.leftMargin = dp(6);
-        chip.addView(volumeLabel, labelLp);
-        return chip;
     }
 
-    private View createSmallHeaderButton(String value, Runnable action) {
-        TextView button = text(value, 28, Color.WHITE, true);
-        button.setGravity(Gravity.CENTER);
-        styleHeaderFocusable(button);
-        button.setOnClickListener(v -> action.run());
-        return button;
+    private LinearLayout.LayoutParams toolLp(int width) {
+        return new LinearLayout.LayoutParams(width, dp(68));
     }
 
-    private View createIconHeaderButton(int iconRes, String description, Runnable action) {
-        FrameLayout box = new FrameLayout(this);
-        styleHeaderFocusable(box);
-        ImageView icon = new ImageView(this);
-        icon.setImageResource(iconRes);
-        icon.setColorFilter(Color.WHITE);
-        icon.setContentDescription(description);
-        icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        int p = dp(15);
-        box.setPadding(p, p, p, p);
-        box.addView(icon, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT));
-        box.setOnClickListener(v -> action.run());
-        return box;
+    private View separator() {
+        View sep = new View(this);
+        sep.setBackgroundColor(SEP);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(1), dp(46));
+        lp.leftMargin = dp(7);
+        lp.rightMargin = dp(7);
+        lp.topMargin = dp(10);
+        sep.setLayoutParams(lp);
+        return sep;
     }
 
-    private LinearLayout headerChip() {
-        LinearLayout chip = new LinearLayout(this);
-        chip.setPadding(dp(10), dp(8), dp(10), dp(8));
-        styleHeaderFocusable(chip);
-        return chip;
-    }
+    private void renderApps() {
+        if (appsArea == null) return;
+        appsArea.removeAllViews();
+        if (cachedApps == null || cachedApps.isEmpty()) cachedApps = getLaunchableApps();
 
-    private void styleHeaderFocusable(View view) {
-        view.setFocusable(true);
-        view.setClickable(true);
-        view.setBackground(headerBackground(false));
-        view.setOnFocusChangeListener((v, focused) -> v.setBackground(headerBackground(focused)));
-    }
-
-    private GradientDrawable headerBackground(boolean focused) {
-        GradientDrawable gd = new GradientDrawable();
-        gd.setColor(focused ? Color.rgb(42, 46, 53) : Color.rgb(24, 27, 32));
-        gd.setCornerRadius(dp(16));
-        gd.setStroke(dp(focused ? 2 : 1), focused ? Color.WHITE : Color.rgb(48, 53, 61));
-        return gd;
-    }
-
-    private void renderFavorites() {
-        if (favoritesArea == null) return;
-        favoritesArea.removeAllViews();
-
-        List<AppEntry> apps = getLaunchableApps();
         List<String> stored = loadFavorites();
         List<String> clean = new ArrayList<>();
         for (String component : stored) {
-            if (findByComponent(apps, component) != null && clean.size() < MAX_TILES) clean.add(component);
+            if (findByComponent(cachedApps, component) != null &&
+                    !clean.contains(component) && clean.size() < MAX_TILES) {
+                clean.add(component);
+            }
         }
         if (!clean.equals(stored)) saveFavorites(clean);
 
         int cellCount = clean.size() + (clean.size() < MAX_TILES ? 1 : 0);
         int rows = Math.max(1, (cellCount + COLS - 1) / COLS);
         rows = Math.min(3, rows);
-        int position = 0;
 
+        int pos = 0;
         for (int r = 0; r < rows; r++) {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_HORIZONTAL | Gravity.CENTER_VERTICAL);
+            row.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
             LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, tileSize);
-            if (r > 0) rowLp.topMargin = dp(12);
-            favoritesArea.addView(row, rowLp);
+                    LinearLayout.LayoutParams.MATCH_PARENT, tileSizePx);
+            if (r > 0) rowLp.topMargin = dp(22);
+            appsArea.addView(row, rowLp);
 
             for (int c = 0; c < COLS; c++) {
-                View cell;
-                if (position < clean.size()) {
-                    AppEntry entry = findByComponent(apps, clean.get(position));
-                    cell = createAppTile(entry, position);
-                } else if (position == clean.size() && clean.size() < MAX_TILES) {
-                    cell = createAddTile();
+                if (pos >= cellCount) break;
+                View tile;
+                if (pos < clean.size()) {
+                    tile = createAppTile(findByComponent(cachedApps, clean.get(pos)), pos);
                 } else {
-                    cell = new View(this);
+                    tile = createAddTile();
                 }
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(tileSize, tileSize);
-                if (c > 0) lp.leftMargin = dp(12);
-                row.addView(cell, lp);
-                position++;
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(tileSizePx, tileSizePx);
+                if (c > 0) lp.leftMargin = dp(22);
+                row.addView(tile, lp);
+                pos++;
             }
         }
     }
 
-    private View createAppTile(AppEntry entry, int index) {
-        LinearLayout card = baseAppCard();
-        card.setGravity(Gravity.CENTER);
-        card.setOrientation(LinearLayout.VERTICAL);
+    private View createAppTile(AppEntry app, int index) {
+        FrameLayout card = new FrameLayout(this);
+        card.setFocusable(true);
+        card.setClickable(true);
+        card.setLongClickable(true);
+        card.setBackground(appCard(false));
 
         ImageView icon = new ImageView(this);
         icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        if (entry != null && entry.icon != null) icon.setImageDrawable(entry.icon);
-        card.addView(icon, new LinearLayout.LayoutParams(dp(58), dp(58)));
+        if (app != null && app.icon != null) icon.setImageDrawable(app.icon);
+        int iconSize = Math.max(dp(62), (int)(tileSizePx * 0.48f));
+        card.addView(icon, new FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER));
 
-        TextView label = text(entry != null ? entry.label : "Aplicación", 17, Color.WHITE, true);
+        TextView label = text(app != null ? app.label : "", 13, Color.WHITE, true);
         label.setGravity(Gravity.CENTER);
-        label.setMaxLines(2);
+        label.setMaxLines(1);
         label.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        labelLp.topMargin = dp(10);
+        label.setAlpha(0f);
+        FrameLayout.LayoutParams labelLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(30), Gravity.BOTTOM);
+        labelLp.leftMargin = dp(8);
+        labelLp.rightMargin = dp(8);
+        labelLp.bottomMargin = dp(7);
         card.addView(label, labelLp);
 
-        if (entry != null) card.setOnClickListener(v -> launchApp(entry));
-        card.setOnLongClickListener(v -> {
-            showTileOptions(index);
-            return true;
+        card.setOnFocusChangeListener((v, focused) -> {
+            v.setBackground(appCard(focused));
+            v.animate().cancel();
+            v.animate().scaleX(focused ? 1.035f : 1f)
+                    .scaleY(focused ? 1.035f : 1f).setDuration(70).start();
+            label.animate().alpha(focused ? 1f : 0f).setDuration(70).start();
         });
+
+        if (app != null) {
+            card.setOnClickListener(v -> launchApp(app));
+            card.setOnLongClickListener(v -> {
+                showTileOptions(index);
+                return true;
+            });
+        }
         return card;
     }
 
     private View createAddTile() {
-        LinearLayout card = baseAppCard();
-        card.setGravity(Gravity.CENTER);
-        card.setOrientation(LinearLayout.VERTICAL);
-        TextView plus = text("+", 46, Color.rgb(220, 224, 230), false);
+        FrameLayout card = new FrameLayout(this);
+        card.setFocusable(true);
+        card.setClickable(true);
+        card.setBackground(appCard(false));
+
+        TextView plus = text("+", 58, Color.WHITE, false);
         plus.setGravity(Gravity.CENTER);
-        card.addView(plus, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(60)));
-        TextView label = text("Agregar", 16, Color.rgb(190, 196, 205), true);
-        label.setGravity(Gravity.CENTER);
-        card.addView(label);
+        card.addView(plus, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        card.setOnFocusChangeListener((v, focused) -> {
+            v.setBackground(appCard(focused));
+            v.animate().cancel();
+            v.animate().scaleX(focused ? 1.035f : 1f)
+                    .scaleY(focused ? 1.035f : 1f).setDuration(70).start();
+        });
         card.setOnClickListener(v -> addNewTile());
         return card;
     }
 
-    private LinearLayout baseAppCard() {
-        LinearLayout card = new LinearLayout(this);
-        card.setPadding(dp(14), dp(12), dp(14), dp(12));
-        card.setFocusable(true);
-        card.setClickable(true);
-        card.setLongClickable(true);
-        card.setBackground(appCardBackground(false));
-        card.setOnFocusChangeListener((v, focused) -> {
-            v.setBackground(appCardBackground(focused));
-            v.animate().scaleX(focused ? 1.035f : 1f)
-                    .scaleY(focused ? 1.035f : 1f).setDuration(80).start();
-        });
-        return card;
-    }
-
-    private GradientDrawable appCardBackground(boolean focused) {
+    private GradientDrawable appCard(boolean focused) {
         GradientDrawable gd = new GradientDrawable();
-        gd.setColor(focused ? Color.rgb(42, 46, 53) : Color.rgb(25, 28, 33));
-        gd.setCornerRadius(dp(24));
-        gd.setStroke(dp(focused ? 3 : 1),
-                focused ? Color.WHITE : Color.rgb(49, 54, 63));
+        gd.setColor(focused ? CARD_FOCUS : CARD);
+        gd.setCornerRadius(dp(22));
+        gd.setStroke(dp(focused ? 3 : 0), focused ? Color.WHITE : CARD);
         return gd;
     }
 
-    private View createUtilityCard(String symbol, String label, Runnable action) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.HORIZONTAL);
-        card.setGravity(Gravity.CENTER);
-        card.setPadding(dp(12), dp(8), dp(12), dp(8));
-        card.setFocusable(true);
-        card.setClickable(true);
-        card.setBackground(headerBackground(false));
-        card.setOnFocusChangeListener((v, focused) -> v.setBackground(headerBackground(focused)));
-
-        TextView symbolView = text(symbol, symbol.length() > 3 ? 14 : 24, Color.WHITE, true);
-        symbolView.setGravity(Gravity.CENTER);
-        card.addView(symbolView, new LinearLayout.LayoutParams(dp(52),
-                LinearLayout.LayoutParams.MATCH_PARENT));
-
-        TextView labelView = text(label, 15, Color.WHITE, true);
-        labelView.setGravity(Gravity.CENTER_VERTICAL);
-        labelView.setMaxLines(1);
-        labelView.setEllipsize(TextUtils.TruncateAt.END);
-        card.addView(labelView, new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.MATCH_PARENT, 1f));
-        card.setTag(labelView);
-        card.setOnClickListener(v -> action.run());
-        return card;
-    }
-
-    private LinearLayout.LayoutParams utilityLp(int col) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-        if (col > 0) lp.leftMargin = dp(8);
-        return lp;
+    private void addNewTile() {
+        if (loadFavorites().size() < MAX_TILES) showAppPicker(-1);
     }
 
     private void showTileOptions(int index) {
-        List<String> favorites = loadFavorites();
-        if (index < 0 || index >= favorites.size()) return;
-        AppEntry current = findByComponent(getLaunchableApps(), favorites.get(index));
-        String title = current != null ? current.label : "Aplicación";
         String[] options = {"Cambiar aplicación", "Eliminar cuadro"};
         new AlertDialog.Builder(this)
-                .setTitle(title)
-                .setItems(options, (dialog, which) -> {
-                    if (which == 0) chooseReplacement(index);
-                    else deleteTile(index);
+                .setTitle("Editar cuadro")
+                .setItems(options, (d, which) -> {
+                    if (which == 0) showAppPicker(index);
+                    else removeFavorite(index);
                 })
                 .setNegativeButton("Cancelar", null)
                 .show();
     }
 
-    private void addNewTile() {
-        List<String> favorites = loadFavorites();
-        if (favorites.size() >= MAX_TILES) {
-            Toast.makeText(this, "Máximo de 12 cuadros", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        showAppPicker("Agregar aplicación", app -> {
-            List<String> list = loadFavorites();
-            if (list.contains(app.component())) {
-                Toast.makeText(this, "Esa aplicación ya está en Inicio", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            list.add(app.component());
-            saveFavorites(list);
-            renderFavorites();
-        });
-    }
+    private void showAppPicker(int replaceIndex) {
+        if (cachedApps == null || cachedApps.isEmpty()) cachedApps = getLaunchableApps();
+        final List<AppEntry> apps = new ArrayList<>(cachedApps);
 
-    private void chooseReplacement(int index) {
-        showAppPicker("Cambiar aplicación", app -> {
-            List<String> list = loadFavorites();
-            if (index < 0 || index >= list.size()) return;
-            int existing = list.indexOf(app.component());
-            if (existing >= 0 && existing != index) {
-                Toast.makeText(this, "Esa aplicación ya está en Inicio", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            list.set(index, app.component());
-            saveFavorites(list);
-            renderFavorites();
-        });
-    }
-
-    private void deleteTile(int index) {
-        List<String> list = loadFavorites();
-        if (index < 0 || index >= list.size()) return;
-        list.remove(index);
-        saveFavorites(list);
-        renderFavorites();
-    }
-
-    private interface AppSelectionListener {
-        void onSelected(AppEntry app);
-    }
-
-    private void showAppPicker(String title, AppSelectionListener listener) {
-        List<AppEntry> apps = getLaunchableApps();
         ListView list = new ListView(this);
-        list.setDividerHeight(1);
-        list.setBackgroundColor(Color.rgb(17, 19, 23));
-        list.setAdapter(new AppPickerAdapter(apps));
-        list.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
+        list.setDividerHeight(0);
+        list.setPadding(dp(8), dp(8), dp(8), dp(8));
+        list.setAdapter(new AppPickerAdapter(this, apps));
 
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle(title)
+                .setTitle(replaceIndex >= 0 ? "Cambiar aplicación" : "Agregar aplicación")
                 .setView(list)
                 .setNegativeButton("Cancelar", null)
                 .create();
+
         list.setOnItemClickListener((parent, view, position, id) -> {
+            AppEntry selected = apps.get(position);
+            List<String> favs = loadFavorites();
+            favs.remove(selected.component());
+            if (replaceIndex >= 0 && replaceIndex < favs.size()) {
+                favs.set(replaceIndex, selected.component());
+            } else if (replaceIndex >= 0 && replaceIndex == favs.size()) {
+                favs.add(selected.component());
+            } else if (favs.size() < MAX_TILES) {
+                favs.add(selected.component());
+            }
+            saveFavorites(favs);
             dialog.dismiss();
-            listener.onSelected(apps.get(position));
+            renderApps();
         });
         dialog.show();
-        list.requestFocus();
     }
 
-    private void showAllApps() {
-        showAppPicker("Todas las aplicaciones", this::launchApp);
-    }
-
-    private class AppPickerAdapter extends BaseAdapter {
-        private final List<AppEntry> apps;
-        AppPickerAdapter(List<AppEntry> apps) { this.apps = apps; }
-        @Override public int getCount() { return apps.size(); }
-        @Override public Object getItem(int position) { return apps.get(position); }
-        @Override public long getItemId(int position) { return position; }
-
-        @Override
-        public View getView(int position, View convertView, ViewGroup parent) {
-            AppEntry app = apps.get(position);
-            LinearLayout row = new LinearLayout(MainActivity.this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(18), dp(10), dp(18), dp(10));
-            row.setMinimumHeight(dp(72));
-            row.setBackgroundColor(Color.rgb(20, 23, 27));
-            row.setFocusable(true);
-
-            ImageView icon = new ImageView(MainActivity.this);
-            icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-            if (app.icon != null) icon.setImageDrawable(app.icon);
-            row.addView(icon, new LinearLayout.LayoutParams(dp(48), dp(48)));
-
-            LinearLayout texts = new LinearLayout(MainActivity.this);
-            texts.setOrientation(LinearLayout.VERTICAL);
-            LinearLayout.LayoutParams textsLp = new LinearLayout.LayoutParams(0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            textsLp.leftMargin = dp(16);
-            row.addView(texts, textsLp);
-
-            TextView name = text(app.label, 17, Color.WHITE, true);
-            name.setSingleLine(true);
-            name.setEllipsize(TextUtils.TruncateAt.END);
-            texts.addView(name);
-            TextView pkg = text(app.pkg, 11, Color.rgb(135, 142, 152), false);
-            pkg.setSingleLine(true);
-            pkg.setEllipsize(TextUtils.TruncateAt.END);
-            texts.addView(pkg);
-            return row;
+    private void removeFavorite(int index) {
+        List<String> favs = loadFavorites();
+        if (index >= 0 && index < favs.size()) {
+            favs.remove(index);
+            saveFavorites(favs);
+            renderApps();
         }
-    }
-
-    private void migrateFavoritesStorage() {
-        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        if (prefs.getBoolean("favorites_v2", false)) return;
-        List<String> existing = new ArrayList<>();
-        for (int i = 0; i < MAX_TILES; i++) {
-            String value = prefs.getString("fav_" + i, "");
-            if (value != null && !value.isEmpty()) existing.add(value);
-        }
-        SharedPreferences.Editor ed = prefs.edit();
-        ed.putBoolean("favorites_v2", true);
-        ed.putInt("fav_count", existing.size());
-        for (int i = 0; i < existing.size(); i++) ed.putString("fav_" + i, existing.get(i));
-        ed.apply();
     }
 
     private void initializeFavoritesIfNeeded() {
-        List<String> current = loadFavorites();
-        if (!current.isEmpty()) return;
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (prefs.getBoolean("favorites_initialized_v3", false)) return;
 
-        List<AppEntry> apps = getLaunchableApps();
-        List<String> ordered = new ArrayList<>();
-        String[] priorities = new String[] {
-                "smarttube", "mokatube", "youtube", "netflix",
-                "spotify", "chrome", "browser", "file", "explorer"
-        };
-        for (String p : priorities) {
-            for (AppEntry app : apps) {
-                String haystack = (app.pkg + " " + app.label).toLowerCase(Locale.US);
-                if (!ordered.contains(app.component()) && haystack.contains(p)) {
-                    ordered.add(app.component());
-                    break;
+        List<String> existing = loadFavorites();
+        if (existing.isEmpty()) {
+            String[] priorities = {"smarttube", "mokatube", "youtube", "netflix",
+                    "spotify", "browser", "chrome", "file", "explorer"};
+            Set<String> used = new HashSet<>();
+            for (String p : priorities) {
+                for (AppEntry app : cachedApps) {
+                    String hay = (app.pkg + " " + app.label).toLowerCase(Locale.US);
+                    if (!used.contains(app.component()) && hay.contains(p)) {
+                        existing.add(app.component());
+                        used.add(app.component());
+                        break;
+                    }
+                }
+                if (existing.size() >= INITIAL_TILES) break;
+            }
+            for (AppEntry app : cachedApps) {
+                if (existing.size() >= INITIAL_TILES) break;
+                if (!used.contains(app.component())) {
+                    existing.add(app.component());
+                    used.add(app.component());
                 }
             }
-            if (ordered.size() >= INITIAL_TILES) break;
+            saveFavorites(existing);
         }
-        for (AppEntry app : apps) {
-            if (ordered.size() >= INITIAL_TILES) break;
-            if (!ordered.contains(app.component())) ordered.add(app.component());
+        prefs.edit().putBoolean("favorites_initialized_v3", true).apply();
+    }
+
+    private void migrateFavoritesStorage() {
+        SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (p.contains("favorites_csv")) return;
+        List<String> old = new ArrayList<>();
+        for (int i = 0; i < 18; i++) {
+            String value = p.getString("fav_" + i, "");
+            if (value != null && !value.isEmpty()) old.add(value);
         }
-        saveFavorites(ordered);
+        if (!old.isEmpty()) saveFavorites(old);
     }
 
     private List<String> loadFavorites() {
-        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        int count = Math.min(MAX_TILES, Math.max(0, prefs.getInt("fav_count", 0)));
-        List<String> list = new ArrayList<>();
-        for (int i = 0; i < count; i++) {
-            String value = prefs.getString("fav_" + i, "");
-            if (value != null && !value.isEmpty()) list.add(value);
-        }
-        return list;
+        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString("favorites_csv", "");
+        List<String> out = new ArrayList<>();
+        if (raw == null || raw.isEmpty()) return out;
+        for (String p : raw.split("\\n")) if (!p.trim().isEmpty()) out.add(p.trim());
+        return out;
     }
 
-    private void saveFavorites(List<String> list) {
-        SharedPreferences.Editor ed = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
-        for (int i = 0; i < MAX_TILES; i++) ed.remove("fav_" + i);
-        int count = Math.min(MAX_TILES, list.size());
-        for (int i = 0; i < count; i++) ed.putString("fav_" + i, list.get(i));
-        ed.putInt("fav_count", count);
-        ed.putBoolean("favorites_v2", true);
-        ed.apply();
+    private void saveFavorites(List<String> favs) {
+        StringBuilder sb = new StringBuilder();
+        for (String f : favs) {
+            if (f == null || f.isEmpty()) continue;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(f);
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit().putString("favorites_csv", sb.toString()).apply();
     }
 
     private List<AppEntry> getLaunchableApps() {
         PackageManager pm = getPackageManager();
+        Intent i = new Intent(Intent.ACTION_MAIN);
+        i.addCategory(Intent.CATEGORY_LAUNCHER);
+        List<ResolveInfo> infos = pm.queryIntentActivities(i, 0);
         List<AppEntry> apps = new ArrayList<>();
         Set<String> seen = new HashSet<>();
-        collectLaunchableApps(pm, Intent.CATEGORY_LAUNCHER, apps, seen);
-        collectLaunchableApps(pm, Intent.CATEGORY_LEANBACK_LAUNCHER, apps, seen);
+
+        for (ResolveInfo ri : infos) {
+            if (ri.activityInfo == null) continue;
+            String pkg = ri.activityInfo.packageName;
+            String cls = ri.activityInfo.name;
+            if (getPackageName().equals(pkg)) continue;
+            String key = pkg + "|" + cls;
+            if (!seen.add(key)) continue;
+
+            AppEntry e = new AppEntry();
+            e.pkg = pkg;
+            e.cls = cls;
+            CharSequence label = ri.loadLabel(pm);
+            e.label = label == null ? pkg : label.toString();
+            try { e.icon = ri.loadIcon(pm); } catch (Exception ignored) {}
+            apps.add(e);
+        }
         Collections.sort(apps, Comparator.comparing(a -> a.label.toLowerCase(Locale.getDefault())));
         return apps;
     }
 
-    private void collectLaunchableApps(PackageManager pm, String category,
-                                       List<AppEntry> apps, Set<String> seen) {
-        Intent intent = new Intent(Intent.ACTION_MAIN, null);
-        intent.addCategory(category);
-        List<ResolveInfo> infos = pm.queryIntentActivities(intent, 0);
-        for (ResolveInfo ri : infos) {
-            if (ri.activityInfo == null) continue;
-            String pkg = ri.activityInfo.packageName;
-            if (getPackageName().equals(pkg)) continue;
-            String cls = ri.activityInfo.name;
-            String key = pkg + "|" + cls;
-            if (!seen.add(key)) continue;
-            AppEntry e = new AppEntry();
-            e.pkg = pkg;
-            e.cls = cls;
-            CharSequence labelCs = ri.loadLabel(pm);
-            e.label = labelCs == null ? pkg : labelCs.toString();
-            try { e.icon = ri.loadIcon(pm); } catch (Exception ignored) {}
-            apps.add(e);
-        }
-    }
-
     private AppEntry findByComponent(List<AppEntry> apps, String component) {
-        if (component == null || component.isEmpty()) return null;
+        if (component == null) return null;
         for (AppEntry a : apps) if (component.equals(a.component())) return a;
         return null;
     }
@@ -689,160 +545,46 @@ public class MainActivity extends Activity {
             i.setComponent(new ComponentName(app.pkg, app.cls));
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(i);
-        } catch (Exception first) {
-            try {
-                Intent i = getPackageManager().getLaunchIntentForPackage(app.pkg);
-                if (i != null) startActivity(i);
-                else throw first;
-            } catch (Exception e) {
-                Toast.makeText(this, "No pude abrir " + app.label, Toast.LENGTH_SHORT).show();
-            }
+        } catch (Exception e) {
+            Toast.makeText(this, "No pude abrir " + app.label, Toast.LENGTH_SHORT).show();
         }
     }
 
-    private void openSystem(String action) {
-        try { startActivity(new Intent(action)); }
-        catch (Exception e) { Toast.makeText(this, "Opción no disponible", Toast.LENGTH_SHORT).show(); }
-    }
-
-    private void updateNetworkStatus() {
-        if (networkIcon == null || networkLabel == null) return;
-        try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-            NetworkInfo info = cm != null ? cm.getActiveNetworkInfo() : null;
-            if (info == null || !info.isConnected()) {
-                networkIcon.setImageResource(R.drawable.ic_network_off);
-                networkLabel.setText("Sin red");
-            } else if (info.getType() == ConnectivityManager.TYPE_ETHERNET) {
-                networkIcon.setImageResource(R.drawable.ic_ethernet);
-                networkLabel.setText("LAN");
-            } else if (info.getType() == ConnectivityManager.TYPE_WIFI) {
-                networkIcon.setImageResource(R.drawable.ic_wifi);
-                networkLabel.setText("Wi‑Fi");
-            } else {
-                networkIcon.setImageResource(R.drawable.ic_wifi);
-                networkLabel.setText("Red");
-            }
-        } catch (Exception ignored) {
-            networkIcon.setImageResource(R.drawable.ic_network_off);
-            networkLabel.setText("Red");
-        }
-    }
-
-    private void volumeUp() {
-        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-        if (am != null) am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
-                AudioManager.ADJUST_RAISE, 0);
-        updateVolumeStatus();
-    }
-
-    private void volumeDown() {
-        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-        if (am != null) am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
-                AudioManager.ADJUST_LOWER, 0);
-        updateVolumeStatus();
-    }
-
-    private void updateVolumeStatus() {
-        if (volumeLabel == null) return;
-        try {
-            AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-            if (am == null) return;
-            int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-            int current = am.getStreamVolume(AudioManager.STREAM_MUSIC);
-            int pct = max > 0 ? Math.round(current * 100f / max) : 0;
-            volumeLabel.setText(pct + "%");
-        } catch (Exception ignored) {}
-    }
-
-    private void expandNotifications() {
-        worker.submit(() -> {
-            boolean ok = runRootCommand("cmd statusbar expand-notifications >/dev/null 2>&1 || service call statusbar 1 >/dev/null 2>&1");
-            if (!ok) uiHandler.post(() -> Toast.makeText(this,
-                    "No pude abrir las notificaciones", Toast.LENGTH_SHORT).show());
-        });
-    }
-
-    private void ensureDefaultLauncher() {
-        if (isDefaultLauncher()) return;
-        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        if (prefs.getBoolean("default_attempt_v2", false)) return;
-        prefs.edit().putBoolean("default_attempt_v2", true).apply();
-
-        worker.submit(() -> {
-            runRootCommand("cmd package set-home-activity --user 0 com.mokano.mokahome/.MainActivity >/dev/null 2>&1 || pm set-home-activity --user 0 com.mokano.mokahome/.MainActivity >/dev/null 2>&1");
-            try { Thread.sleep(450); } catch (InterruptedException ignored) {}
-            boolean selected = isDefaultLauncher();
-            uiHandler.post(() -> {
-                if (selected) {
-                    Toast.makeText(this, "MokaHome quedó como Inicio predeterminado", Toast.LENGTH_SHORT).show();
+    private void freeMemory() {
+        long before = availableRamMb();
+        ramTopText.setText("...");
+        worker.execute(() -> {
+            boolean ok = runRootScript("am kill-all >/dev/null 2>&1");
+            try { Thread.sleep(350); } catch (InterruptedException ignored) {}
+            long after = availableRamMb();
+            ui.post(() -> {
+                ramTopText.setText("RAM");
+                if (ok) {
+                    long gain = Math.max(0, after - before);
+                    String msg = gain > 0 ? "RAM libre: " + after + " MB  (+" + gain + " MB)"
+                            : "RAM libre: " + after + " MB";
+                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
                 } else {
-                    try {
-                        Toast.makeText(this, "Selecciona MokaHome como aplicación de Inicio", Toast.LENGTH_LONG).show();
-                        startActivity(new Intent(Settings.ACTION_HOME_SETTINGS));
-                    } catch (Exception e) {
-                        Toast.makeText(this, "Pulsa HOME y selecciona MokaHome → Siempre", Toast.LENGTH_LONG).show();
-                    }
+                    Toast.makeText(this, "No pude obtener acceso root", Toast.LENGTH_SHORT).show();
                 }
             });
         });
-    }
-
-    private boolean isDefaultLauncher() {
-        try {
-            Intent home = new Intent(Intent.ACTION_MAIN);
-            home.addCategory(Intent.CATEGORY_HOME);
-            ResolveInfo ri = getPackageManager().resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
-            return ri != null && ri.activityInfo != null && getPackageName().equals(ri.activityInfo.packageName);
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     private void killBackgroundApps() {
-        if (killerCard != null) killerCard.setEnabled(false);
-        if (killerLabel != null) killerLabel.setText("Cerrando…");
-        if (killerStatus != null) killerStatus.setText("Liberando aplicaciones en segundo plano");
-
-        worker.submit(() -> {
+        worker.execute(() -> {
             List<String> targets = collectKillTargets();
-            StringBuilder command = new StringBuilder();
+            StringBuilder script = new StringBuilder();
             for (String pkg : targets) {
                 if (pkg.matches("[A-Za-z0-9._]+")) {
-                    command.append("am force-stop ").append(pkg).append(" >/dev/null 2>&1; ");
+                    script.append("am force-stop ").append(pkg).append(" >/dev/null 2>&1\n");
                 }
             }
-            boolean ok = runRootCommand(command.toString());
-            int count = targets.size();
-            uiHandler.post(() -> {
-                if (killerCard != null) killerCard.setEnabled(true);
-                if (killerLabel != null) killerLabel.setText("Cerrar apps");
-                if (killerStatus != null) killerStatus.setText(ok ?
-                        "✓ " + count + " aplicaciones cerradas" : "No pude obtener acceso root");
-                refreshRam();
-                uiHandler.postDelayed(() -> {
-                    if (killerStatus != null) killerStatus.setText("");
-                }, 2600);
-            });
+            boolean ok = runRootScript(script.toString());
+            ui.post(() -> Toast.makeText(this,
+                    ok ? targets.size() + " apps cerradas" : "No pude obtener acceso root",
+                    Toast.LENGTH_SHORT).show());
         });
-    }
-
-    private boolean runRootCommand(String command) {
-        Process su = null;
-        DataOutputStream os = null;
-        try {
-            su = Runtime.getRuntime().exec("su");
-            os = new DataOutputStream(su.getOutputStream());
-            os.writeBytes(command + "\n");
-            os.writeBytes("exit\n");
-            os.flush();
-            return su.waitFor() == 0;
-        } catch (Exception ignored) {
-            return false;
-        } finally {
-            try { if (os != null) os.close(); } catch (Exception ignored) {}
-            if (su != null) su.destroy();
-        }
     }
 
     private List<String> collectKillTargets() {
@@ -874,13 +616,8 @@ public class MainActivity extends Activity {
             String input = Settings.Secure.getString(getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD);
             if (input != null && input.contains("/")) out.add(input.substring(0, input.indexOf('/')));
         } catch (Exception ignored) {}
-        try {
-            Intent home = new Intent(Intent.ACTION_MAIN);
-            home.addCategory(Intent.CATEGORY_HOME);
-            for (ResolveInfo ri : getPackageManager().queryIntentActivities(home, 0)) {
-                if (ri.activityInfo != null) out.add(ri.activityInfo.packageName);
-            }
-        } catch (Exception ignored) {}
+        String disabled = getSharedPreferences(PREFS, MODE_PRIVATE).getString("disabled_launcher", "");
+        if (disabled != null && !disabled.isEmpty()) out.add(disabled);
         return out;
     }
 
@@ -898,37 +635,187 @@ public class MainActivity extends Activity {
                 pkg.startsWith("com.android.networkstack");
     }
 
-    private void refreshRam() {
+    private void ensureLauncherOwnership() {
+        long now = System.currentTimeMillis();
+        if (now - lastHomeTakeoverAt < 10_000) return;
+        lastHomeTakeoverAt = now;
+
+        String current = currentHomePackage();
+        if (getPackageName().equals(current) &&
+                getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("launcher_takeover_done", false)) return;
+
+        String old = isSafeLauncherPackage(current) ? current : "";
+        worker.execute(() -> {
+            String component = getPackageName() + "/.MainActivity";
+            StringBuilder script = new StringBuilder();
+            script.append("cmd package set-home-activity --user 0 ").append(component)
+                    .append(" >/dev/null 2>&1 || cmd package set-home-activity ")
+                    .append(component).append(" >/dev/null 2>&1\n");
+            if (!old.isEmpty()) {
+                script.append("pm disable-user --user 0 ").append(old).append(" >/dev/null 2>&1\n");
+            }
+            script.append("am start -a android.intent.action.MAIN -c android.intent.category.HOME -n ")
+                    .append(component).append(" >/dev/null 2>&1\n");
+
+            boolean ok = runRootScript(script.toString());
+            if (ok) {
+                SharedPreferences.Editor ed = getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean("launcher_takeover_done", true);
+                if (!old.isEmpty()) ed.putString("disabled_launcher", old);
+                ed.apply();
+            }
+        });
+    }
+
+    private String currentHomePackage() {
         try {
-            ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            Intent home = new Intent(Intent.ACTION_MAIN);
+            home.addCategory(Intent.CATEGORY_HOME);
+            ResolveInfo ri = getPackageManager().resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
+            if (ri != null && ri.activityInfo != null) return ri.activityInfo.packageName;
+        } catch (Exception ignored) {}
+        return "";
+    }
+
+    private boolean isSafeLauncherPackage(String pkg) {
+        if (pkg == null || pkg.isEmpty() || pkg.equals(getPackageName()) || pkg.equals("android") ||
+                pkg.equals("com.android.systemui") || pkg.equals("com.android.settings")) return false;
+        try {
+            Intent home = new Intent(Intent.ACTION_MAIN);
+            home.addCategory(Intent.CATEGORY_HOME);
+            for (ResolveInfo ri : getPackageManager().queryIntentActivities(home, 0)) {
+                if (ri.activityInfo != null && pkg.equals(ri.activityInfo.packageName)) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private void showLauncherRecovery() {
+        String old = getSharedPreferences(PREFS, MODE_PRIVATE).getString("disabled_launcher", "");
+        if (old == null || old.isEmpty()) {
+            Toast.makeText(this, "No hay launcher anterior guardado", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Launcher anterior")
+                .setMessage("¿Reactivar " + old + "?")
+                .setPositiveButton("Reactivar", (d, w) -> worker.execute(() -> {
+                    boolean ok = runRootScript("pm enable " + old + " >/dev/null 2>&1");
+                    if (ok) {
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                                .remove("disabled_launcher")
+                                .putBoolean("launcher_takeover_done", false).apply();
+                    }
+                    ui.post(() -> Toast.makeText(this,
+                            ok ? "Launcher anterior reactivado" : "No pude reactivarlo",
+                            Toast.LENGTH_SHORT).show());
+                }))
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private void expandNotifications() {
+        worker.execute(() -> {
+            boolean ok = runRootScript(
+                    "cmd statusbar expand-notifications >/dev/null 2>&1 || " +
+                    "service call statusbar 1 >/dev/null 2>&1 || " +
+                    "service call statusbar 2 >/dev/null 2>&1");
+            if (!ok) ui.post(() -> Toast.makeText(this,
+                    "La ROM no permitió abrir notificaciones", Toast.LENGTH_SHORT).show());
+        });
+    }
+
+    private boolean runRootScript(String script) {
+        Process su = null;
+        DataOutputStream os = null;
+        try {
+            su = Runtime.getRuntime().exec("su");
+            os = new DataOutputStream(su.getOutputStream());
+            os.writeBytes(script);
+            if (!script.endsWith("\n")) os.writeBytes("\n");
+            os.writeBytes("exit\n");
+            os.flush();
+            return su.waitFor() == 0;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            try { if (os != null) os.close(); } catch (Exception ignored) {}
+            if (su != null) su.destroy();
+        }
+    }
+
+    private long availableRamMb() {
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
             ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
             am.getMemoryInfo(mi);
-            long freeMb = mi.availMem / (1024 * 1024);
-            long totalMb = mi.totalMem / (1024 * 1024);
-            if (ramText != null) ramText.setText("RAM libre  " + freeMb + " MB / " + totalMb + " MB");
-        } catch (Exception ignored) {}
+            return mi.availMem / (1024 * 1024);
+        } catch (Exception e) { return 0; }
     }
 
     private void updateClock() {
         Date now = new Date();
-        DateFormat timeFmt = new SimpleDateFormat("h:mm a", Locale.getDefault());
-        DateFormat dateFmt = new SimpleDateFormat("EEE d MMM", new Locale("es", "DO"));
-        if (clockText != null) clockText.setText(timeFmt.format(now));
-        if (dateText != null) dateText.setText(dateFmt.format(now));
+        clockText.setText(new SimpleDateFormat("h:mm", Locale.getDefault()).format(now));
+        amPmText.setText(new SimpleDateFormat("a", Locale.getDefault())
+                .format(now).toLowerCase(Locale.getDefault()));
+        String d = new SimpleDateFormat("EEEE, d 'de' MMMM", new Locale("es", "DO")).format(now);
+        if (!d.isEmpty()) d = Character.toUpperCase(d.charAt(0)) + d.substring(1);
+        dateText.setText(d);
+    }
+
+    private void updateNetworkIcon() {
+        if (networkIcon == null) return;
+        int res = R.drawable.ic_network_off;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            NetworkInfo active = cm == null ? null : cm.getActiveNetworkInfo();
+            if (active != null && active.isConnected()) {
+                if (active.getType() == ConnectivityManager.TYPE_WIFI) res = R.drawable.ic_wifi;
+                else res = R.drawable.ic_ethernet;
+            }
+        } catch (Exception ignored) {}
+        networkIcon.setImageResource(res);
+    }
+
+    private void openNetworkSettings() {
+        try { startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS)); }
+        catch (Exception e) { openSystem(Settings.ACTION_SETTINGS); }
+    }
+
+    private void volumeDown() {
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (am != null) am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI);
+    }
+
+    private void volumeUp() {
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (am != null) am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI);
+    }
+
+    private void showVolumeUi() {
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (am != null) am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI);
+    }
+
+    private void openSystem(String action) {
+        try { startActivity(new Intent(action)); }
+        catch (Exception e) { Toast.makeText(this, "Opción no disponible", Toast.LENGTH_SHORT).show(); }
     }
 
     private int calculateTileSize() {
         DisplayMetrics dm = getResources().getDisplayMetrics();
-        float widthDp = dm.widthPixels / dm.density;
-        float desired = (widthDp - 100f) / 4f;
-        desired = Math.max(118f, Math.min(176f, desired));
-        return dp(Math.round(desired));
+        int byWidth = (dm.widthPixels - dp(76) - dp(22) * (COLS - 1)) / COLS;
+        int byHeight = (dm.heightPixels - dp(166) - dp(48) - dp(44)) / 3;
+        return Math.max(dp(112), Math.min(byWidth, byHeight));
     }
 
-    private TextView text(String value, int sizeSp, int color, boolean bold) {
+    private TextView text(String value, int sp, int color, boolean bold) {
         TextView tv = new TextView(this);
         tv.setText(value);
-        tv.setTextSize(sizeSp);
+        tv.setTextSize(sp);
         tv.setTextColor(color);
         tv.setTypeface(Typeface.DEFAULT, bold ? Typeface.BOLD : Typeface.NORMAL);
         return tv;
@@ -941,18 +828,68 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        renderFavorites();
+        cachedApps = getLaunchableApps();
+        renderApps();
         updateClock();
-        refreshRam();
-        updateNetworkStatus();
-        updateVolumeStatus();
+        updateNetworkIcon();
+        ui.postDelayed(this::ensureLauncherOwnership, 350);
     }
 
     @Override
     protected void onDestroy() {
-        uiHandler.removeCallbacksAndMessages(null);
+        ui.removeCallbacksAndMessages(null);
         worker.shutdownNow();
         super.onDestroy();
+    }
+
+    private class AppPickerAdapter extends BaseAdapter {
+        private final Context context;
+        private final List<AppEntry> apps;
+
+        AppPickerAdapter(Context context, List<AppEntry> apps) {
+            this.context = context;
+            this.apps = apps;
+        }
+
+        @Override public int getCount() { return apps.size(); }
+        @Override public Object getItem(int position) { return apps.get(position); }
+        @Override public long getItemId(int position) { return position; }
+
+        @Override
+        public View getView(int position, View convertView, ViewGroup parent) {
+            AppEntry app = apps.get(position);
+            LinearLayout row = new LinearLayout(context);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(16), dp(9), dp(16), dp(9));
+            row.setFocusable(true);
+
+            ImageView icon = new ImageView(context);
+            icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            if (app.icon != null) icon.setImageDrawable(app.icon);
+            row.addView(icon, new LinearLayout.LayoutParams(dp(52), dp(52)));
+
+            LinearLayout labels = new LinearLayout(context);
+            labels.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout.LayoutParams labelsLp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            labelsLp.leftMargin = dp(16);
+            row.addView(labels, labelsLp);
+            labels.addView(text(app.label, 17, Color.WHITE, true));
+            labels.addView(text(app.pkg, 11, Color.rgb(155, 155, 155), false));
+
+            row.setBackground(appPickerRow(false));
+            row.setOnFocusChangeListener((v, focused) -> v.setBackground(appPickerRow(focused)));
+            return row;
+        }
+    }
+
+    private GradientDrawable appPickerRow(boolean focused) {
+        GradientDrawable gd = new GradientDrawable();
+        gd.setColor(focused ? Color.rgb(54, 54, 54) : Color.rgb(34, 34, 34));
+        gd.setCornerRadius(dp(12));
+        gd.setStroke(dp(focused ? 2 : 0), focused ? Color.WHITE : Color.TRANSPARENT);
+        return gd;
     }
 
     private static class AppEntry {
