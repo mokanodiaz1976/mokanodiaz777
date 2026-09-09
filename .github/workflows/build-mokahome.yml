@@ -6,6 +6,10 @@ on:
     paths:
       - 'mokahome/**'
       - '.github/workflows/build-mokahome.yml'
+  pull_request:
+    paths:
+      - 'mokahome/**'
+      - '.github/workflows/build-mokahome.yml'
 
 jobs:
   build:
