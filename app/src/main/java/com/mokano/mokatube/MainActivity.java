@@ -1,7 +1,6 @@
 package com.mokano.mokatube;
 
 import android.app.Activity;
-import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
@@ -48,11 +47,20 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final String[] API_BASES = new String[] {
+    private static final String[] PIPED_BASES = new String[] {
             "https://pipedapi.kavin.rocks",
             "https://pipedapi.tokhmi.xyz",
+            "https://pipedapi.moomoo.me",
+            "https://pipedapi.syncpundit.io",
             "https://api-piped.mha.fi",
-            "https://piped-api.garudalinux.org"
+            "https://piped-api.garudalinux.org",
+            "https://pipedapi.rivo.lol",
+            "https://pipedapi.leptons.xyz"
+    };
+
+    private static final String[] INVIDIOUS_BASES = new String[] {
+            "https://inv.nadeko.net",
+            "https://invidious.nerdvpn.de"
     };
 
     private static final int MAX_ITEMS = 28;
@@ -61,8 +69,8 @@ public class MainActivity extends Activity {
     private static final String HISTORY = "history";
 
     private final ExecutorService apiExecutor = Executors.newSingleThreadExecutor();
-    private final ExecutorService imageExecutor = Executors.newFixedThreadPool(4);
-    private final LruCache<String, Bitmap> imageCache = new LruCache<String, Bitmap>(12 * 1024) {
+    private final ExecutorService imageExecutor = Executors.newFixedThreadPool(3);
+    private final LruCache<String, Bitmap> imageCache = new LruCache<String, Bitmap>(16 * 1024) {
         @Override
         protected int sizeOf(String key, Bitmap value) {
             return Math.max(1, value.getByteCount() / 1024);
@@ -77,7 +85,9 @@ public class MainActivity extends Activity {
     private int screenWidth;
     private int sidebarWidth;
     private int cardThumbHeight;
-    private String activeBase = API_BASES[0];
+    private String activePiped = PIPED_BASES[0];
+    private String activeInvidious = INVIDIOUS_BASES[0];
+    private String lastProvider = "";
 
     @Override
     public void onCreate(Bundle state) {
@@ -96,7 +106,7 @@ public class MainActivity extends Activity {
         cardThumbHeight = cardWidth * 9 / 16;
 
         setContentView(buildUi());
-        loadTrending();
+        loadHome();
     }
 
     private View buildUi() {
@@ -133,12 +143,7 @@ public class MainActivity extends Activity {
         searchLp.setMargins(dp(8), 0, dp(8), 0);
         top.addView(searchInput, searchLp);
 
-        Button searchButton = new Button(this);
-        searchButton.setText("Buscar");
-        searchButton.setAllCaps(false);
-        searchButton.setTextColor(Color.WHITE);
-        searchButton.setBackgroundColor(Color.rgb(38, 38, 38));
-        searchButton.setFocusable(true);
+        Button searchButton = makeButton("Buscar");
         top.addView(searchButton, new LinearLayout.LayoutParams(dp(100), dp(42)));
 
         View.OnClickListener searchAction = v -> {
@@ -166,7 +171,7 @@ public class MainActivity extends Activity {
         body.addView(sidebar, new LinearLayout.LayoutParams(sidebarWidth,
                 LinearLayout.LayoutParams.MATCH_PARENT));
 
-        addNav(sidebar, "⌂   Inicio", this::loadTrending);
+        addNav(sidebar, "⌂   Inicio", this::loadHome);
         addNav(sidebar, "♫   Música", () -> loadSearch("música"));
         addNav(sidebar, "▣   Tecnología", () -> loadSearch("tecnología"));
         addNav(sidebar, "🏍   Motocicletas", () -> loadSearch("motocicletas"));
@@ -192,6 +197,7 @@ public class MainActivity extends Activity {
         pageTitle.setTextColor(Color.WHITE);
         pageTitle.setTextSize(20);
         pageTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        pageTitle.setGravity(Gravity.CENTER_VERTICAL);
         header.addView(pageTitle, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.MATCH_PARENT, 1f));
 
@@ -199,7 +205,7 @@ public class MainActivity extends Activity {
         statusText.setTextColor(Color.rgb(160, 160, 160));
         statusText.setTextSize(12);
         statusText.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
-        header.addView(statusText, new LinearLayout.LayoutParams(dp(220),
+        header.addView(statusText, new LinearLayout.LayoutParams(dp(260),
                 LinearLayout.LayoutParams.MATCH_PARENT));
 
         progress = new ProgressBar(this);
@@ -211,7 +217,7 @@ public class MainActivity extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
-        scroll.setSmoothScrollingEnabled(true);
+        scroll.setSmoothScrollingEnabled(false);
         right.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
@@ -223,6 +229,16 @@ public class MainActivity extends Activity {
                 ScrollView.LayoutParams.WRAP_CONTENT));
 
         return root;
+    }
+
+    private Button makeButton(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextColor(Color.WHITE);
+        b.setBackgroundColor(Color.rgb(38, 38, 38));
+        b.setFocusable(true);
+        return b;
     }
 
     private void addNav(LinearLayout parent, String text, Runnable action) {
@@ -253,24 +269,54 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             progress.setVisibility(loading ? View.VISIBLE : View.GONE);
             if (title != null) pageTitle.setText(title);
-            statusText.setText(loading ? "Cargando…" : "");
+            statusText.setText(loading ? "Buscando servidor…" : "");
+            if (loading) gridContainer.removeAllViews();
         });
     }
 
-    private void loadTrending() {
+    private void loadHome() {
         setLoading(true, "Inicio");
         apiExecutor.submit(() -> {
+            List<VideoItem> items = null;
+
             try {
-                String json = requestJson("/trending?region=DO");
-                JSONArray arr = new JSONArray(json);
-                List<VideoItem> items = new ArrayList<>();
-                for (int i = 0; i < arr.length() && items.size() < MAX_ITEMS; i++) {
-                    VideoItem item = parseVideo(arr.optJSONObject(i));
-                    if (item != null) items.add(item);
-                }
+                String json = requestPiped("/trending?region=DO");
+                items = parsePipedArray(new JSONArray(json));
+                if (items.isEmpty()) throw new Exception("Piped empty");
+                lastProvider = "Piped";
+            } catch (Exception ignored) {}
+
+            if (items == null || items.isEmpty()) {
+                try {
+                    String json = requestPiped("/trending?region=US");
+                    items = parsePipedArray(new JSONArray(json));
+                    if (items.isEmpty()) throw new Exception("Piped empty");
+                    lastProvider = "Piped";
+                } catch (Exception ignored) {}
+            }
+
+            if (items == null || items.isEmpty()) {
+                try {
+                    String json = requestInvidious("/api/v1/trending?region=DO");
+                    items = parseInvidiousArray(new JSONArray(json));
+                    if (items.isEmpty()) throw new Exception("Invidious empty");
+                    lastProvider = "Invidious";
+                } catch (Exception ignored) {}
+            }
+
+            if (items == null || items.isEmpty()) {
+                try {
+                    String json = requestInvidious("/api/v1/popular");
+                    items = parseInvidiousArray(new JSONArray(json));
+                    if (items.isEmpty()) throw new Exception("Invidious empty");
+                    lastProvider = "Invidious";
+                } catch (Exception ignored) {}
+            }
+
+            if (items == null || items.isEmpty()) {
+                showError("No pude conectar con los servidores de videos.", true);
+            } else {
                 showVideos(items, "Inicio");
-            } catch (Exception e) {
-                showError("No pude cargar Inicio. Prueba Buscar o vuelve a intentar.");
             }
         });
     }
@@ -278,95 +324,175 @@ public class MainActivity extends Activity {
     private void loadSearch(String query) {
         setLoading(true, query);
         apiExecutor.submit(() -> {
+            List<VideoItem> items = null;
+            String encoded;
             try {
-                String encoded = URLEncoder.encode(query, "UTF-8");
-                String json = requestJson("/search?q=" + encoded + "&filter=videos");
+                encoded = URLEncoder.encode(query, "UTF-8");
+            } catch (Exception e) {
+                encoded = query;
+            }
+
+            try {
+                String json = requestPiped("/search?q=" + encoded + "&filter=videos");
                 JSONObject root = new JSONObject(json);
                 JSONArray arr = root.optJSONArray("items");
-                List<VideoItem> items = new ArrayList<>();
-                if (arr != null) {
-                    for (int i = 0; i < arr.length() && items.size() < MAX_ITEMS; i++) {
-                        VideoItem item = parseVideo(arr.optJSONObject(i));
-                        if (item != null) items.add(item);
-                    }
-                }
+                items = parsePipedArray(arr != null ? arr : new JSONArray());
+                if (items.isEmpty()) throw new Exception("Piped empty");
+                lastProvider = "Piped";
+            } catch (Exception ignored) {}
+
+            if (items == null || items.isEmpty()) {
+                try {
+                    String json = requestInvidious("/api/v1/search?q=" + encoded + "&type=video&region=DO");
+                    items = parseInvidiousArray(new JSONArray(json));
+                    if (items.isEmpty()) throw new Exception("Invidious empty");
+                    lastProvider = "Invidious";
+                } catch (Exception ignored) {}
+            }
+
+            if (items == null || items.isEmpty()) {
+                showError("No pude completar la búsqueda. Intenta nuevamente.", false);
+            } else {
                 showVideos(items, query);
-            } catch (Exception e) {
-                showError("No pude completar la búsqueda. Intenta de nuevo.");
             }
         });
     }
 
-    private String requestJson(String path) throws Exception {
-        List<String> bases = new ArrayList<>();
-        bases.add(activeBase);
-        for (String b : API_BASES) if (!b.equals(activeBase)) bases.add(b);
-
+    private String requestPiped(String path) throws Exception {
+        List<String> bases = orderedBases(activePiped, PIPED_BASES);
         Exception last = null;
         for (String base : bases) {
-            HttpURLConnection conn = null;
             try {
-                URL url = new URL(base + path);
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setConnectTimeout(6000);
-                conn.setReadTimeout(9000);
-                conn.setRequestProperty("Accept", "application/json");
-                conn.setRequestProperty("User-Agent", "MokaTube/0.2 Android");
-                int code = conn.getResponseCode();
-                if (code != 200) throw new Exception("HTTP " + code);
-
-                BufferedReader br = new BufferedReader(new InputStreamReader(
-                        conn.getInputStream(), "UTF-8"));
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = br.readLine()) != null) sb.append(line);
-                br.close();
-                String out = sb.toString();
-                if (out.length() < 2) throw new Exception("empty response");
-                activeBase = base;
+                String out = request(base + path, 4500, 7000);
+                activePiped = base;
                 return out;
             } catch (Exception e) {
                 last = e;
-            } finally {
-                if (conn != null) conn.disconnect();
             }
         }
-        throw last != null ? last : new Exception("No API available");
+        throw last != null ? last : new Exception("No Piped server");
     }
 
-    private VideoItem parseVideo(JSONObject o) {
-        if (o == null) return null;
-        String url = o.optString("url", "");
-        if (url.isEmpty() || (!url.contains("watch?v=") && !url.contains("/shorts/"))) return null;
-        if (url.startsWith("/")) url = "https://www.youtube.com" + url;
+    private String requestInvidious(String path) throws Exception {
+        List<String> bases = orderedBases(activeInvidious, INVIDIOUS_BASES);
+        Exception last = null;
+        for (String base : bases) {
+            try {
+                String out = request(base + path, 5000, 8000);
+                activeInvidious = base;
+                return out;
+            } catch (Exception e) {
+                last = e;
+            }
+        }
+        throw last != null ? last : new Exception("No Invidious server");
+    }
 
-        VideoItem v = new VideoItem();
-        v.url = url;
-        v.title = o.optString("title", "Video");
-        v.thumbnail = o.optString("thumbnail", o.optString("thumbnailUrl", ""));
-        v.uploader = o.optString("uploaderName", o.optString("uploader", ""));
-        v.uploaded = o.optString("uploadedDate", "");
-        v.views = o.optLong("views", -1);
-        v.duration = o.optLong("duration", 0);
-        return v;
+    private List<String> orderedBases(String active, String[] all) {
+        List<String> out = new ArrayList<>();
+        if (active != null && !active.isEmpty()) out.add(active);
+        for (String b : all) if (!b.equals(active)) out.add(b);
+        return out;
+    }
+
+    private String request(String fullUrl, int connectTimeout, int readTimeout) throws Exception {
+        HttpURLConnection conn = null;
+        BufferedReader br = null;
+        try {
+            conn = (HttpURLConnection) new URL(fullUrl).openConnection();
+            conn.setConnectTimeout(connectTimeout);
+            conn.setReadTimeout(readTimeout);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android 9; MokaTube/0.3)");
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
+            br = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = br.readLine()) != null) sb.append(line);
+            String out = sb.toString();
+            if (out.length() < 2 || out.charAt(0) == '<') throw new Exception("Invalid response");
+            return out;
+        } finally {
+            try { if (br != null) br.close(); } catch (Exception ignored) {}
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private List<VideoItem> parsePipedArray(JSONArray arr) {
+        List<VideoItem> items = new ArrayList<>();
+        for (int i = 0; i < arr.length() && items.size() < MAX_ITEMS; i++) {
+            JSONObject o = arr.optJSONObject(i);
+            if (o == null) continue;
+            String rawUrl = o.optString("url", "");
+            String id = extractVideoId(rawUrl);
+            if (id.isEmpty()) continue;
+            VideoItem v = new VideoItem();
+            v.url = "https://www.youtube.com/watch?v=" + id;
+            v.title = o.optString("title", "Video");
+            v.thumbnail = youtubeThumb(id);
+            v.uploader = o.optString("uploaderName", o.optString("uploader", ""));
+            v.uploaded = o.optString("uploadedDate", "");
+            v.views = o.optLong("views", -1);
+            v.duration = o.optLong("duration", 0);
+            items.add(v);
+        }
+        return items;
+    }
+
+    private List<VideoItem> parseInvidiousArray(JSONArray arr) {
+        List<VideoItem> items = new ArrayList<>();
+        for (int i = 0; i < arr.length() && items.size() < MAX_ITEMS; i++) {
+            JSONObject o = arr.optJSONObject(i);
+            if (o == null) continue;
+            String type = o.optString("type", "video");
+            if (!(type.equals("video") || type.equals("shortVideo") || type.isEmpty())) continue;
+            String id = o.optString("videoId", "");
+            if (id.isEmpty()) continue;
+            VideoItem v = new VideoItem();
+            v.url = "https://www.youtube.com/watch?v=" + id;
+            v.title = o.optString("title", "Video");
+            v.thumbnail = youtubeThumb(id);
+            v.uploader = o.optString("author", "");
+            v.uploaded = o.optString("publishedText", "");
+            v.views = o.optLong("viewCount", -1);
+            v.duration = o.optLong("lengthSeconds", 0);
+            items.add(v);
+        }
+        return items;
+    }
+
+    private String extractVideoId(String raw) {
+        if (raw == null) return "";
+        try {
+            if (raw.contains("watch?v=")) {
+                String id = raw.substring(raw.indexOf("watch?v=") + 8);
+                int amp = id.indexOf('&');
+                if (amp >= 0) id = id.substring(0, amp);
+                return id;
+            }
+            if (raw.contains("/shorts/")) {
+                String id = raw.substring(raw.indexOf("/shorts/") + 8);
+                int q = id.indexOf('?');
+                if (q >= 0) id = id.substring(0, q);
+                return id;
+            }
+        } catch (Exception ignored) {}
+        return "";
+    }
+
+    private String youtubeThumb(String id) {
+        return "https://i.ytimg.com/vi/" + id + "/hqdefault.jpg";
     }
 
     private void showVideos(List<VideoItem> items, String title) {
         runOnUiThread(() -> {
             progress.setVisibility(View.GONE);
             pageTitle.setText(title);
-            statusText.setText(items.size() + " videos");
+            String provider = lastProvider.isEmpty() ? "" : " · " + lastProvider;
+            statusText.setText(items.size() + " videos" + provider);
             gridContainer.removeAllViews();
-
-            if (items.isEmpty()) {
-                TextView empty = new TextView(this);
-                empty.setText("No se encontraron videos.");
-                empty.setTextColor(Color.LTGRAY);
-                empty.setTextSize(18);
-                empty.setPadding(dp(12), dp(40), 0, 0);
-                gridContainer.addView(empty);
-                return;
-            }
 
             for (int i = 0; i < items.size(); i += COLS) {
                 LinearLayout row = new LinearLayout(this);
@@ -384,12 +510,11 @@ public class MainActivity extends Activity {
                         View card = createCard(items.get(idx));
                         LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(0,
                                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-                        if (c > 0) cardLp.setMargins(dp(8), 0, 0, 0);
-                        if (c < COLS - 1) cardLp.rightMargin = dp(8);
+                        cardLp.setMargins(c > 0 ? dp(8) : 0, 0,
+                                c < COLS - 1 ? dp(8) : 0, 0);
                         row.addView(card, cardLp);
                     } else {
-                        Space blank = new Space(this);
-                        row.addView(blank, new LinearLayout.LayoutParams(0, 1, 1f));
+                        row.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1f));
                     }
                 }
             }
@@ -429,18 +554,20 @@ public class MainActivity extends Activity {
         thumbFrame.addView(thumb, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, cardThumbHeight));
 
-        TextView duration = new TextView(this);
-        duration.setText(formatDuration(item.duration));
-        duration.setTextColor(Color.WHITE);
-        duration.setTextSize(11);
-        duration.setPadding(dp(5), dp(2), dp(5), dp(2));
-        duration.setBackgroundColor(Color.argb(205, 0, 0, 0));
-        FrameLayout.LayoutParams durLp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM | Gravity.RIGHT);
-        durLp.setMargins(0, 0, dp(6), dp(6));
-        thumbFrame.addView(duration, durLp);
+        if (item.duration > 0) {
+            TextView duration = new TextView(this);
+            duration.setText(formatDuration(item.duration));
+            duration.setTextColor(Color.WHITE);
+            duration.setTextSize(11);
+            duration.setPadding(dp(5), dp(2), dp(5), dp(2));
+            duration.setBackgroundColor(Color.argb(205, 0, 0, 0));
+            FrameLayout.LayoutParams durLp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM | Gravity.RIGHT);
+            durLp.setMargins(0, 0, dp(6), dp(6));
+            thumbFrame.addView(duration, durLp);
+        }
         card.addView(thumbFrame, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, cardThumbHeight));
 
@@ -458,13 +585,12 @@ public class MainActivity extends Activity {
         TextView meta = new TextView(this);
         StringBuilder m = new StringBuilder();
         if (!item.uploader.isEmpty()) m.append(item.uploader);
-        if (item.views >= 0) {
+        String views = formatViews(item.views);
+        if (!views.isEmpty() || !item.uploaded.isEmpty()) {
             if (m.length() > 0) m.append("\n");
-            m.append(formatViews(item.views));
-            if (!item.uploaded.isEmpty()) m.append(" · ").append(item.uploaded);
-        } else if (!item.uploaded.isEmpty()) {
-            if (m.length() > 0) m.append("\n");
-            m.append(item.uploaded);
+            if (!views.isEmpty()) m.append(views);
+            if (!views.isEmpty() && !item.uploaded.isEmpty()) m.append(" · ");
+            if (!item.uploaded.isEmpty()) m.append(item.uploaded);
         }
         meta.setText(m.toString());
         meta.setTextColor(Color.rgb(170, 170, 170));
@@ -477,13 +603,8 @@ public class MainActivity extends Activity {
 
         card.setOnFocusChangeListener((v, hasFocus) -> {
             v.setBackgroundColor(hasFocus ? Color.rgb(47, 47, 47) : Color.TRANSPARENT);
-            if (hasFocus) {
-                v.setScaleX(1.015f);
-                v.setScaleY(1.015f);
-            } else {
-                v.setScaleX(1f);
-                v.setScaleY(1f);
-            }
+            v.setScaleX(hasFocus ? 1.012f : 1f);
+            v.setScaleY(hasFocus ? 1.012f : 1f);
         });
         card.setOnClickListener(v -> {
             addToHistory(item);
@@ -507,11 +628,13 @@ public class MainActivity extends Activity {
             InputStream in = null;
             try {
                 conn = (HttpURLConnection) new URL(url).openConnection();
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(7000);
-                conn.setRequestProperty("User-Agent", "MokaTube/0.2");
+                conn.setConnectTimeout(4500);
+                conn.setReadTimeout(6500);
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android 9; MokaTube/0.3)");
                 in = conn.getInputStream();
-                Bitmap bmp = BitmapFactory.decodeStream(in);
+                BitmapFactory.Options opts = new BitmapFactory.Options();
+                opts.inPreferredConfig = Bitmap.Config.RGB_565;
+                Bitmap bmp = BitmapFactory.decodeStream(in, null, opts);
                 if (bmp != null) {
                     imageCache.put(url, bmp);
                     runOnUiThread(() -> {
@@ -528,8 +651,13 @@ public class MainActivity extends Activity {
     }
 
     private void showHistory() {
+        lastProvider = "Local";
         List<VideoItem> history = readHistory();
-        showVideos(history, "Historial");
+        if (history.isEmpty()) {
+            showError("Todavía no has reproducido videos desde MokaTube.", false);
+        } else {
+            showVideos(history, "Historial");
+        }
     }
 
     private void addToHistory(VideoItem item) {
@@ -585,17 +713,36 @@ public class MainActivity extends Activity {
         return list;
     }
 
-    private void showError(String message) {
+    private void showError(String message, boolean retryHome) {
         runOnUiThread(() -> {
             progress.setVisibility(View.GONE);
-            statusText.setText("Error");
+            statusText.setText("Sin conexión al proveedor");
             gridContainer.removeAllViews();
+
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setPadding(dp(12), dp(34), dp(12), dp(12));
+            gridContainer.addView(box);
+
             TextView t = new TextView(this);
             t.setText(message);
             t.setTextColor(Color.LTGRAY);
             t.setTextSize(18);
-            t.setPadding(dp(10), dp(36), 0, 0);
-            gridContainer.addView(t);
+            box.addView(t);
+
+            TextView detail = new TextView(this);
+            detail.setText("MokaTube probará automáticamente varios servidores al reintentar.");
+            detail.setTextColor(Color.rgb(150, 150, 150));
+            detail.setTextSize(13);
+            detail.setPadding(0, dp(8), 0, dp(14));
+            box.addView(detail);
+
+            if (retryHome) {
+                Button retry = makeButton("Reintentar");
+                retry.setOnClickListener(v -> loadHome());
+                box.addView(retry, new LinearLayout.LayoutParams(dp(150), dp(46)));
+                retry.requestFocus();
+            }
         });
     }
 
@@ -643,8 +790,7 @@ public class MainActivity extends Activity {
     }
 
     private int dp(int value) {
-        float d = getResources().getDisplayMetrics().density;
-        return Math.round(value * d);
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
     @Override
