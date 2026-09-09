@@ -67,6 +67,17 @@ jobs:
           sed -i 's/int localCode = BuildConfig.VERSION_CODE;/int localCode = 10;/' "$UPD"
           sed -i 's/"MokaHome\/"+BuildConfig.VERSION_NAME/"MokaHome\/1.0"/g' "$UPD"
 
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('mokahome/migrator/src/main/java/com/mokano/mokahome/migrator/MigratorActivity.java')
+          s = p.read_text()
+          needle = '                script.append("pm uninstall $PKG >/data/local/tmp/mokahome-old-uninstall.log 2>&1 || pm uninstall --user 0 $PKG >/data/local/tmp/mokahome-old-uninstall.log 2>&1\\n");'
+          insert = '''                // Fail-safe: reactiva cualquier HOME alternativo antes de retirar la versión vieja.\n                // Si la instalación nueva fallara, la caja nunca queda sin launcher.\n                for (String pck : otherLaunchers) {\n                    if (safePackage(pck)) script.append("pm enable --user 0 ").append(pck).append(" >/dev/null 2>&1\\n");\n                }\n''' + needle
+          if needle not in s:
+              raise SystemExit('No se encontró punto de inserción fail-safe')
+          p.write_text(s.replace(needle, insert, 1))
+          PY
+
       - name: Build MokaHome 1.0
         working-directory: mokahome
         run: gradle :app:assembleDebug
