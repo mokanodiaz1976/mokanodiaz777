@@ -50,9 +50,22 @@ jobs:
           echo "MokaHome 1.x signer:"
           keytool -list -v -keystore /home/runner/.android/debug.keystore -storepass android -alias androiddebugkey | grep 'SHA256:' | head -n1
 
-      - name: Android 9 compatibility patch
+      - name: Android 9 and Java compatibility patches
         run: |
           sed -i 's/Settings.ACTION_NOTIFICATION_SETTINGS/"android.settings.NOTIFICATION_SETTINGS"/g' mokahome/app/src/main/java/com/mokano/mokahome/MainActivityV4.java
+
+          FILE=mokahome/app/src/main/java/com/mokano/mokahome/MokaHomeAppV1.java
+          sed -i 's/private int bg(Context c)/static int bg(Context c)/' "$FILE"
+          sed -i 's/private int fg(Context c)/static int fg(Context c)/' "$FILE"
+          sed -i 's/private int muted(Context c)/static int muted(Context c)/' "$FILE"
+          sed -i 's/private int dp(Context c,int v)/static int dp(Context c,int v)/' "$FILE"
+          sed -i 's/private SharedPreferences prefs(Context c)/static SharedPreferences prefs(Context c)/' "$FILE"
+          sed -i 's/private void toast(Context c,String s)/static void toast(Context c,String s)/' "$FILE"
+          sed -i 's/private void showDialog(Dialog d, Context c, int width, int height)/static void showDialog(Dialog d, Context c, int width, int height)/' "$FILE"
+
+          UPD=mokahome/app/src/main/java/com/mokano/mokahome/UpdateManager.java
+          sed -i 's/int localCode = BuildConfig.VERSION_CODE;/int localCode = 10;/' "$UPD"
+          sed -i 's/"MokaHome\/"+BuildConfig.VERSION_NAME/"MokaHome\/1.0"/g' "$UPD"
 
       - name: Build MokaHome 1.0
         working-directory: mokahome
