@@ -2,11 +2,9 @@ name: Build MokaHome APK
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 0'
   push:
-    paths:
-      - 'mokahome/**'
-      - '.github/workflows/build-mokahome.yml'
-  pull_request:
     paths:
       - 'mokahome/**'
       - '.github/workflows/build-mokahome.yml'
@@ -26,29 +24,48 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - name: Reuse debug signing key
+
+      - name: Restore pinned MokaHome signing key
         uses: actions/cache@v4
         with:
           path: ~/.android/debug.keystore
-          key: mokahome-debug-keystore-v1
-      - name: Ensure stable debug signing key
+          key: mokahome-signing-b1-v1
+          restore-keys: |
+            mokahome-debug-keystore-v1
+
+      - name: Verify pinned signing certificate
         run: |
-          mkdir -p ~/.android
           if [ ! -f ~/.android/debug.keystore ]; then
-            keytool -genkeypair -v \
-              -keystore ~/.android/debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -dname "CN=Android Debug,O=Android,C=US" \
-              -keyalg RSA -keysize 2048 -validity 10000
+            echo "MokaHome signing key is missing. Refusing to create a new incompatible key."
+            exit 1
           fi
+          EXPECTED="B1:B3:A0:7C:48:70:61:39:71:14:B4:A6:CE:38:71:AA:92:C8:B7:8C:9F:AF:34:1A:A7:8B:CD:DA:74:DB:46:79"
+          ACTUAL=$(keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey 2>/dev/null | sed -n 's/.*SHA256: //p' | head -n1 | tr -d '\r')
+          echo "Expected signer: $EXPECTED"
+          echo "Restored signer: $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "Signing certificate mismatch. Build stopped to protect in-place updates."
+            exit 1
+          fi
+
       - name: Android 9 compatibility patch
         run: |
           sed -i 's/Settings.ACTION_NOTIFICATION_SETTINGS/"android.settings.NOTIFICATION_SETTINGS"/g' mokahome/app/src/main/java/com/mokano/mokahome/MainActivityV4.java
+
       - name: Build APK
         working-directory: mokahome
         run: gradle :app:assembleDebug
+
+      - name: Verify APK signer
+        run: |
+          EXPECTED="B1:B3:A0:7C:48:70:61:39:71:14:B4:A6:CE:38:71:AA:92:C8:B7:8C:9F:AF:34:1A:A7:8B:CD:DA:74:DB:46:79"
+          ACTUAL=$(keytool -printcert -jarfile mokahome/app/build/outputs/apk/debug/app-debug.apk 2>/dev/null | sed -n 's/.*SHA256: //p' | head -n1 | tr -d '\r')
+          echo "APK signer: $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "APK signer mismatch. Artifact will not be published."
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: MokaHome-APK
