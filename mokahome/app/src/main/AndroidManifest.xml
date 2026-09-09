@@ -13,7 +13,7 @@
         android:theme="@style/AppTheme">
 
         <activity
-            android:name=".MainActivityV4"
+            android:name=".MainActivityV5"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
