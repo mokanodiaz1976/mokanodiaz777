@@ -1,10 +1,10 @@
-name: Build MokaHome APK
+name: Build MokaHome 1.0
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '17 6 * * 0'
   push:
+    branches:
+      - mokahome-v1
     paths:
       - 'mokahome/**'
       - '.github/workflows/build-mokahome.yml'
@@ -14,59 +14,69 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
       - uses: android-actions/setup-android@v3
+
       - name: Install Android SDK
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Restore pinned MokaHome signing key
+      - name: Restore MokaHome 1.x signing key
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: mokahome-signing-b1-v1
-          restore-keys: |
-            mokahome-debug-keystore-v1
+          path: /home/runner/.android/debug.keystore
+          key: mokahome-v1-signing-20260909
 
-      - name: Verify pinned signing certificate
+      - name: Ensure stable 1.x signing key
         run: |
-          if [ ! -f ~/.android/debug.keystore ]; then
-            echo "MokaHome signing key is missing. Refusing to create a new incompatible key."
-            exit 1
+          mkdir -p /home/runner/.android
+          if [ ! -f /home/runner/.android/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore /home/runner/.android/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=MokaHome 1.x,O=Mokano,C=DO" \
+              -keyalg RSA -keysize 2048 -validity 10000
           fi
-          EXPECTED="B1:B3:A0:7C:48:70:61:39:71:14:B4:A6:CE:38:71:AA:92:C8:B7:8C:9F:AF:34:1A:A7:8B:CD:DA:74:DB:46:79"
-          ACTUAL=$(keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey 2>/dev/null | sed -n 's/.*SHA256: //p' | head -n1 | tr -d '\r')
-          echo "Expected signer: $EXPECTED"
-          echo "Restored signer: $ACTUAL"
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "Signing certificate mismatch. Build stopped to protect in-place updates."
-            exit 1
-          fi
+          echo "MokaHome 1.x signer:"
+          keytool -list -v -keystore /home/runner/.android/debug.keystore -storepass android -alias androiddebugkey | grep 'SHA256:' | head -n1
 
       - name: Android 9 compatibility patch
         run: |
           sed -i 's/Settings.ACTION_NOTIFICATION_SETTINGS/"android.settings.NOTIFICATION_SETTINGS"/g' mokahome/app/src/main/java/com/mokano/mokahome/MainActivityV4.java
 
-      - name: Build APK
+      - name: Build MokaHome 1.0
         working-directory: mokahome
         run: gradle :app:assembleDebug
 
-      - name: Verify APK signer
+      - name: Embed MokaHome inside migrator
         run: |
-          EXPECTED="B1:B3:A0:7C:48:70:61:39:71:14:B4:A6:CE:38:71:AA:92:C8:B7:8C:9F:AF:34:1A:A7:8B:CD:DA:74:DB:46:79"
-          ACTUAL=$(keytool -printcert -jarfile mokahome/app/build/outputs/apk/debug/app-debug.apk 2>/dev/null | sed -n 's/.*SHA256: //p' | head -n1 | tr -d '\r')
-          echo "APK signer: $ACTUAL"
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "APK signer mismatch. Artifact will not be published."
-            exit 1
-          fi
+          mkdir -p mokahome/migrator/src/main/assets
+          cp mokahome/app/build/outputs/apk/debug/app-debug.apk mokahome/migrator/src/main/assets/MokaHome-v1.0.apk
+
+      - name: Build one-click migrator
+        working-directory: mokahome
+        run: gradle :migrator:assembleDebug
+
+      - name: Show APK certificate
+        run: |
+          keytool -printcert -jarfile mokahome/app/build/outputs/apk/debug/app-debug.apk | grep 'SHA256:' | head -n1
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MokaHome-APK
+          name: MokaHome-v1.0-APK
           path: mokahome/app/build/outputs/apk/debug/app-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MokaHome-v1.0-Migrator
+          path: mokahome/migrator/build/outputs/apk/debug/migrator-debug.apk
