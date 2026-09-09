@@ -31,6 +31,19 @@ jobs:
         with:
           path: ~/.android/debug.keystore
           key: mokahome-debug-keystore-v1
+      - name: Recover cached signing key location
+        run: |
+          mkdir -p "$HOME/.android"
+          echo "HOME=$HOME"
+          echo "Searching cached debug.keystore..."
+          find /home/runner -type f -name debug.keystore -print 2>/dev/null || true
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            FOUND="$(find /home/runner -type f -name debug.keystore ! -path "$HOME/.android/debug.keystore" -print -quit 2>/dev/null || true)"
+            if [ -n "$FOUND" ]; then
+              echo "Recovering cached key from $FOUND"
+              cp "$FOUND" "$HOME/.android/debug.keystore"
+            fi
+          fi
       - name: Ensure stable debug signing key
         run: |
           mkdir -p ~/.android
@@ -43,6 +56,7 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US" \
               -keyalg RSA -keysize 2048 -validity 10000
           fi
+          keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey | grep -E 'SHA256:|Valid from:' || true
       - name: Android 9 compatibility patch
         run: |
           sed -i 's/Settings.ACTION_NOTIFICATION_SETTINGS/"android.settings.NOTIFICATION_SETTINGS"/g' mokahome/app/src/main/java/com/mokano/mokahome/MainActivityV4.java
