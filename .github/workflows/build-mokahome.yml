@@ -27,6 +27,21 @@ jobs:
         with:
           path: ~/.android/debug.keystore
           key: mokahome-debug-keystore-v1
+      - name: Ensure stable debug signing key
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA -keysize 2048 -validity 10000
+          fi
+      - name: Android 9 compatibility patch
+        run: |
+          sed -i 's/Settings.ACTION_NOTIFICATION_SETTINGS/"android.settings.NOTIFICATION_SETTINGS"/g' mokahome/app/src/main/java/com/mokano/mokahome/MainActivityV4.java
       - name: Build APK
         working-directory: mokahome
         run: gradle :app:assembleDebug
